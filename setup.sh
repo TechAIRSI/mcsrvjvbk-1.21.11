@@ -67,6 +67,115 @@ run() {
   fi
 }
 
+# ---- Téléchargement avec barre de progression ----
+download() {
+  local url="$1"
+  local output="$2"
+  local label="${3:-$(basename "$output")}"
+  local BAR_W=40
+
+  # Récupération taille du fichier (HEAD)
+  local expected
+  expected=$(curl -sIL "$url" | grep -i content-length | tail -1 | awk '{print $2}' | tr -dc '0-9')
+  expected="${expected:-0}"
+
+  # Affichage du label + taille
+  if [[ "$expected" -gt 0 ]]; then
+    local total_h
+    if [[ "$expected" -gt 1048576 ]]; then
+      total_h="$(awk "BEGIN{printf \"%.1f Mo\", $expected/1048576}")"
+    else
+      total_h="$(awk "BEGIN{printf \"%.0f Ko\", $expected/1024}")"
+    fi
+    echo -e "  ${CYAN}  ⬇${RESET}  ${WHITE}${BOLD}${label}${RESET}  ${DIM}(${total_h})${RESET}"
+  else
+    echo -e "  ${CYAN}  ⬇${RESET}  ${WHITE}${BOLD}${label}${RESET}"
+  fi
+
+  # Lancement du téléchargement en arrière-plan
+  wget -q "$url" -O "$output" &
+  local pid=$!
+  local start_time=$SECONDS
+
+  # Barre de progression en temps réel
+  while kill -0 "$pid" 2>/dev/null; do
+    if [[ -f "$output" && "$expected" -gt 0 ]]; then
+      local current
+      current=$(stat -c%s "$output" 2>/dev/null || echo 0)
+      local pct=$((current * 100 / expected))
+      (( pct > 100 )) && pct=100
+
+      local filled=$((pct * BAR_W / 100))
+      local empty=$((BAR_W - filled))
+      local bar_done bar_left
+      bar_done=$(printf '%*s' "$filled" '' | tr ' ' '█')
+      bar_left=$(printf '%*s' "$empty" '' | tr ' ' '░')
+
+      local dl_h
+      if [[ "$current" -gt 1048576 ]]; then
+        dl_h="$(awk "BEGIN{printf \"%.1f Mo\", $current/1048576}")"
+      else
+        dl_h="$(awk "BEGIN{printf \"%.0f Ko\", $current/1024}")"
+      fi
+
+      # Calcul vitesse
+      local elapsed=$(( SECONDS - start_time ))
+      local speed_h=""
+      if [[ "$elapsed" -gt 0 ]]; then
+        local bps=$((current / elapsed))
+        if [[ "$bps" -gt 1048576 ]]; then
+          speed_h="$(awk "BEGIN{printf \"%.1f Mo/s\", $bps/1048576}")"
+        else
+          speed_h="$(awk "BEGIN{printf \"%.0f Ko/s\", $bps/1024}")"
+        fi
+      fi
+
+      printf "\r      ${BLUE}[${GREEN}${bar_done}${GRAY}${bar_left}${BLUE}]${RESET} ${WHITE}%3d%%${RESET}  ${DIM}%s  %s${RESET}    " "$pct" "$dl_h" "$speed_h"
+
+    elif [[ -f "$output" ]]; then
+      # Taille inconnue : spinner + taille téléchargée
+      local current
+      current=$(stat -c%s "$output" 2>/dev/null || echo 0)
+      local dl_h
+      if [[ "$current" -gt 1048576 ]]; then
+        dl_h="$(awk "BEGIN{printf \"%.1f Mo\", $current/1048576}")"
+      else
+        dl_h="$(awk "BEGIN{printf \"%.0f Ko\", $current/1024}")"
+      fi
+      local spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+      local elapsed=$(( SECONDS - start_time ))
+      local spin_idx=$(( elapsed % ${#spin_chars[@]} ))
+      printf "\r      ${CYAN}${spin_chars[$spin_idx]}${RESET}  ${DIM}Téléchargé : %s${RESET}    " "$dl_h"
+    fi
+
+    sleep 0.3
+  done
+
+  wait "$pid"
+  local rc=$?
+
+  if [[ $rc -eq 0 ]]; then
+    # Barre complète en vert
+    local full_bar
+    full_bar=$(printf '%*s' "$BAR_W" '' | tr ' ' '█')
+    local final_size
+    final_size=$(stat -c%s "$output" 2>/dev/null || echo 0)
+    local final_h
+    if [[ "$final_size" -gt 1048576 ]]; then
+      final_h="$(awk "BEGIN{printf \"%.1f Mo\", $final_size/1048576}")"
+    else
+      final_h="$(awk "BEGIN{printf \"%.0f Ko\", $final_size/1024}")"
+    fi
+    printf "\r      ${BLUE}[${GREEN}${full_bar}${BLUE}]${RESET} ${GREEN}${BOLD}100%%${RESET}  ${DIM}${final_h}${RESET}$(printf '%20s' '')\n"
+    ok "${label}"
+    return 0
+  else
+    echo
+    fail "${label} — échec du téléchargement"
+    return 1
+  fi
+}
+
 confirm() {
   local msg="$1"
   local default="${2:-n}"
@@ -352,7 +461,7 @@ if confirm "Télécharger Paper ?"; then
     echo
 
     if confirm "Installer ce build ?"; then
-      run "Téléchargement ${PAPER_FILE}" wget -q "$DOWNLOAD_URL" -O "$MC_DIR/$PAPER_FILE"
+      download "$DOWNLOAD_URL" "$MC_DIR/$PAPER_FILE" "$PAPER_FILE"
       ok "Paper enregistré : ${DIM}${MC_DIR}/${PAPER_FILE}${RESET}"
     else
       warn "Téléchargement auto annulé"
@@ -361,7 +470,7 @@ if confirm "Télécharger Paper ?"; then
       read -r MANUAL_URL
       if [[ -n "$MANUAL_URL" ]]; then
         PAPER_FILE=$(basename "$MANUAL_URL")
-        run "Téléchargement ${PAPER_FILE}" wget -q "$MANUAL_URL" -O "$MC_DIR/$PAPER_FILE"
+        download "$MANUAL_URL" "$MC_DIR/$PAPER_FILE" "$PAPER_FILE"
         ok "Paper enregistré : ${DIM}${MC_DIR}/${PAPER_FILE}${RESET}"
       fi
     fi
@@ -376,7 +485,7 @@ if confirm "Télécharger Paper ?"; then
       exit 1
     fi
     PAPER_FILE=$(basename "$MANUAL_URL")
-    run "Téléchargement ${PAPER_FILE}" wget -q "$MANUAL_URL" -O "$MC_DIR/$PAPER_FILE"
+    download "$MANUAL_URL" "$MC_DIR/$PAPER_FILE" "$PAPER_FILE"
     ok "Paper enregistré : ${DIM}${MC_DIR}/${PAPER_FILE}${RESET}"
   fi
 
@@ -420,6 +529,24 @@ if confirm "Créer le service systemd et démarrer le serveur ?"; then
   read -r RAM_MAX
   RAM_MIN="${RAM_MIN:-8G}"
   RAM_MAX="${RAM_MAX:-12G}"
+
+  # Auto-ajout du suffixe G si l'utilisateur entre juste un nombre
+  [[ "$RAM_MIN" =~ ^[0-9]+$ ]] && RAM_MIN="${RAM_MIN}G"
+  [[ "$RAM_MAX" =~ ^[0-9]+$ ]] && RAM_MAX="${RAM_MAX}G"
+
+  # Validation format (nombre + G/M/K)
+  if ! [[ "$RAM_MIN" =~ ^[0-9]+[GgMmKk]$ ]]; then
+    warn "Format RAM min invalide (${RAM_MIN}), défaut : 8G"
+    RAM_MIN="8G"
+  fi
+  if ! [[ "$RAM_MAX" =~ ^[0-9]+[GgMmKk]$ ]]; then
+    warn "Format RAM max invalide (${RAM_MAX}), défaut : 12G"
+    RAM_MAX="12G"
+  fi
+
+  # Conversion en majuscule pour Java
+  RAM_MIN="${RAM_MIN^^}"
+  RAM_MAX="${RAM_MAX^^}"
   echo
 
   cat > "$SCRIPTS_DIR/start.sh" <<STARTEOF
@@ -454,12 +581,28 @@ SVCEOF
   run "Activation service" systemctl enable minecraft
   run "Démarrage serveur" systemctl restart minecraft
 
-  sleep 3
+  info "Attente du démarrage (premier lancement = plus long)..."
+  sleep 8
+
   if systemctl is-active --quiet minecraft; then
     ok "Serveur Minecraft ${GREEN}actif${RESET}"
   else
-    fail "Le service n'a pas démarré"
-    exit 1
+    fail "Le service n'a pas démarré correctement"
+    echo
+    echo -e "  ${YELLOW}${BOLD}  ┌── DIAGNOSTIC ─────────────────────────────────────────┐${RESET}"
+    echo -e "  ${YELLOW}${BOLD}  │${RESET} Contenu de ${DIM}start.sh${RESET} :"
+    echo -e "  ${GRAY}$(cat "$SCRIPTS_DIR/start.sh" | sed 's/^/    /')${RESET}"
+    echo -e "  ${YELLOW}${BOLD}  │${RESET}"
+    echo -e "  ${YELLOW}${BOLD}  │${RESET} Dernières lignes du journal :"
+    echo -e "  ${GRAY}$(journalctl -u minecraft --no-pager -n 15 2>/dev/null | sed 's/^/    /')${RESET}"
+    echo -e "  ${YELLOW}${BOLD}  └─────────────────────────────────────────────────────────┘${RESET}"
+    echo
+    warn "Le serveur peut mettre du temps au 1er lancement (génération du monde)."
+    warn "Vérifiez avec : ${BOLD}journalctl -u minecraft -f${RESET}"
+    echo
+    if ! confirm "Continuer le setup malgré l'erreur ?"; then
+      exit 1
+    fi
   fi
 
 else
@@ -506,22 +649,58 @@ if confirm "Installer les plugins depuis une archive tar.gz ?"; then
   if [[ -z "$PLUGIN_URL" ]]; then
     fail "URL vide"
   else
-    info "Attente du dossier plugins..."
-    systemctl restart "$SERVICE_NAME" 2>/dev/null || true
-    TIMEOUT=120; ELAPSED=0
+
+    # --- Vérification : le serveur tourne-t-il ? ---
+    if ! systemctl is-active --quiet minecraft 2>/dev/null; then
+      warn "Le serveur Minecraft n'est pas actif."
+      info "Tentative de (re)démarrage..."
+      chown -R minecraft:minecraft "$MC_DIR" 2>/dev/null || true
+      chown -R minecraft:minecraft "$SCRIPTS_DIR" 2>/dev/null || true
+      systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+    else
+      info "Serveur Minecraft actif — attente de la création du dossier plugins..."
+    fi
+
+    # --- Attente du dossier plugins ---
+    TIMEOUT=90
+    ELAPSED=0
     while [[ ! -d "$PLUGIN_DIR" ]]; do
       sleep 3
       ELAPSED=$((ELAPSED+3))
+
+      # Toutes les 30s, vérifier si le serveur tourne encore
+      if (( ELAPSED % 30 == 0 )); then
+        if ! systemctl is-active --quiet minecraft 2>/dev/null; then
+          warn "Le serveur s'est arrêté. Tentative de relance..."
+          systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+        fi
+      fi
+
       if [[ "$ELAPSED" -ge "$TIMEOUT" ]]; then
-        fail "Timeout : dossier plugins non créé"
-        exit 1
+        warn "Timeout : le dossier plugins n'a pas été créé par le serveur."
+        echo
+        echo -e "  ${YELLOW}${BOLD}  ┌── DIAGNOSTIC ──────────────────────────────────────────┐${RESET}"
+        echo -e "  ${YELLOW}${BOLD}  │${RESET} Statut du service :"
+        echo -e "  ${GRAY}    $(systemctl is-active minecraft 2>/dev/null || echo 'inactif')${RESET}"
+        echo -e "  ${YELLOW}${BOLD}  │${RESET} Dernières lignes du journal :"
+        echo -e "  ${GRAY}$(journalctl -u minecraft --no-pager -n 10 2>/dev/null | sed 's/^/    /')${RESET}"
+        echo -e "  ${YELLOW}${BOLD}  └──────────────────────────────────────────────────────────┘${RESET}"
+        echo
+
+        info "Création manuelle du dossier plugins..."
+        mkdir -p "$PLUGIN_DIR"
+        chown minecraft:minecraft "$PLUGIN_DIR"
+        ok "Dossier ${BOLD}$PLUGIN_DIR${RESET}${GREEN} créé manuellement"
+        warn "Les plugins seront chargés au prochain démarrage du serveur."
+        break
       fi
     done
-    ok "Dossier plugins détecté"
+
+    [[ -d "$PLUGIN_DIR" ]] && ok "Dossier plugins prêt"
 
     cd "$PLUGIN_DIR"
-    run "Téléchargement plugins" wget -q -O Plugins.tar.gz "$PLUGIN_URL"
-    run "Extraction archive" tar -xzf Plugins.tar.gz -C "$PLUGIN_DIR"
+    download "$PLUGIN_URL" "$PLUGIN_DIR/Plugins.tar.gz" "Plugins.tar.gz"
+    run "Extraction archive" tar -xzf "$PLUGIN_DIR/Plugins.tar.gz" -C "$PLUGIN_DIR"
 
     if [[ -f "$PLUGIN_DIR/MCXboxBroadcastExtension.jar" ]]; then
       mv "$PLUGIN_DIR/MCXboxBroadcastExtension.jar" /tmp/
@@ -529,8 +708,16 @@ if confirm "Installer les plugins depuis une archive tar.gz ?"; then
     fi
 
     rm -f "$PLUGIN_DIR/Plugins.tar.gz"
+
+    chown -R minecraft:minecraft "$MC_DIR"
     ok "Plugins installés"
+
+    info "Redémarrage du serveur pour charger les plugins..."
     run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+
+    # Attente pour laisser le serveur générer les configs des plugins
+    info "Attente de la génération des configs plugins (30s)..."
+    sleep 30
   fi
 
 else
@@ -549,36 +736,68 @@ if confirm "Installer et configurer MCXboxBroadcast ?"; then
   CONFIG_XBOX="$TARGET_EXT/mcxboxbroadcast/config.yml"
   LOCAL_JAR="/tmp/MCXboxBroadcastExtension.jar"
 
+  # Vérification serveur actif
+  if ! systemctl is-active --quiet minecraft 2>/dev/null; then
+    warn "Le serveur Minecraft n'est pas actif."
+    info "Tentative de (re)démarrage..."
+    chown -R minecraft:minecraft "$MC_DIR" 2>/dev/null || true
+    systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+  fi
+
   info "Attente du dossier extensions Geyser..."
-  TIMEOUT=120; ELAPSED=0
+  TIMEOUT=90; ELAPSED=0
   while [[ ! -d "$TARGET_EXT" ]]; do
-    sleep 2
-    ELAPSED=$((ELAPSED+2))
+    sleep 3
+    ELAPSED=$((ELAPSED+3))
+    if (( ELAPSED % 30 == 0 )); then
+      if ! systemctl is-active --quiet minecraft 2>/dev/null; then
+        warn "Le serveur s'est arrêté. Tentative de relance..."
+        systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+      fi
+    fi
     if [[ "$ELAPSED" -ge "$TIMEOUT" ]]; then
-      fail "Timeout : dossier extensions non détecté"
-      exit 1
+      warn "Timeout : dossier extensions non créé par Geyser."
+      echo
+      echo -e "  ${YELLOW}${BOLD}  ┌── DIAGNOSTIC ──────────────────────────────────────────┐${RESET}"
+      echo -e "  ${YELLOW}${BOLD}  │${RESET} Statut du service : $(systemctl is-active minecraft 2>/dev/null || echo 'inactif')"
+      echo -e "  ${YELLOW}${BOLD}  │${RESET} Geyser-Spigot présent : $(ls "$PLUGIN_DIR"/Geyser-Spigot*.jar 2>/dev/null && echo 'oui' || echo 'NON')"
+      echo -e "  ${YELLOW}${BOLD}  │${RESET} Dernières lignes du journal :"
+      echo -e "  ${GRAY}$(journalctl -u minecraft --no-pager -n 10 2>/dev/null | sed 's/^/    /')${RESET}"
+      echo -e "  ${YELLOW}${BOLD}  └──────────────────────────────────────────────────────────┘${RESET}"
+      echo
+
+      info "Création manuelle du dossier extensions..."
+      mkdir -p "$TARGET_EXT"
+      chown -R minecraft:minecraft "$PLUGIN_DIR/Geyser-Spigot"
+      ok "Dossier ${BOLD}$TARGET_EXT${RESET}${GREEN} créé manuellement"
+      break
     fi
   done
-  ok "Dossier extensions détecté"
+  ok "Dossier extensions prêt"
 
   if [[ ! -f "$LOCAL_JAR" ]]; then
     fail "MCXboxBroadcastExtension.jar introuvable dans /tmp"
     warn "Étape ignorée"
   else
     run "Copie extension" cp "$LOCAL_JAR" "$TARGET_EXT/"
+    chown -R minecraft:minecraft "$MC_DIR"
     run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
 
     info "Attente config.yml MCXboxBroadcast..."
     TIMEOUT=60; ELAPSED=0
     while [[ ! -f "$CONFIG_XBOX" ]]; do
-      sleep 2
-      ELAPSED=$((ELAPSED+2))
+      sleep 3
+      ELAPSED=$((ELAPSED+3))
       if [[ "$ELAPSED" -ge "$TIMEOUT" ]]; then
-        fail "Timeout : config.yml non détecté"
-        exit 1
+        warn "Timeout : config.yml non généré automatiquement."
+        warn "Le fichier sera créé au prochain démarrage du serveur."
+        warn "Vous pourrez configurer MCXboxBroadcast manuellement plus tard."
+        break
       fi
     done
-    ok "config.yml détecté"
+
+    if [[ -f "$CONFIG_XBOX" ]]; then
+      ok "config.yml détecté"
 
     echo
     ask "Remote address : "
@@ -718,7 +937,7 @@ if confirm "Installer MariaDB et créer des bases de données ?"; then
     info "Installation de yq v4..."
     apt remove -y yq >/dev/null 2>&1 || true
     rm -f /usr/bin/yq /usr/local/bin/yq
-    run "Téléchargement yq v4" wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O "$YQ"
+    download "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64" "$YQ" "yq v4"
     chmod +x "$YQ"
     if ! "$YQ" --version | grep -q "v4"; then
       fail "Erreur installation yq"
