@@ -74,10 +74,20 @@ download() {
   local label="${3:-$(basename "$output")}"
   local BAR_W=40
 
+  # ══════════════════════════════════════════════════════════════
+  #  IMPORTANT : set +e obligatoire dans cette fonction
+  #  Bash avec set -e tue le script quand (( expr )) retourne 0
+  #  (= false = exit code 1). Toute la logique de progression
+  #  doit tourner sans errexit.
+  # ══════════════════════════════════════════════════════════════
+  set +e
+
   # Récupération taille du fichier (HEAD)
   local expected
-  expected=$(curl -sIL "$url" | grep -i content-length | tail -1 | awk '{print $2}' | tr -dc '0-9')
+  expected=$(curl -sIL "$url" 2>/dev/null | grep -i content-length | tail -1 | awk '{print $2}' | tr -dc '0-9')
   expected="${expected:-0}"
+  # Protection contre les valeurs vides/invalides
+  [[ ! "$expected" =~ ^[0-9]+$ ]] && expected=0
 
   # Affichage du label + taille
   if [[ "$expected" -gt 0 ]]; then
@@ -92,18 +102,33 @@ download() {
     echo -e "  ${CYAN}  ⬇${RESET}  ${WHITE}${BOLD}${label}${RESET}"
   fi
 
+  # Supprimer le fichier s'il existe déjà (évite stat sur ancien fichier)
+  rm -f "$output" 2>/dev/null
+
   # Lancement du téléchargement en arrière-plan
   wget -q "$url" -O "$output" &
   local pid=$!
   local start_time=$SECONDS
 
+  # Petite attente pour que le fichier soit créé
+  sleep 0.5
+
   # Barre de progression en temps réel
   while kill -0 "$pid" 2>/dev/null; do
-    if [[ -f "$output" && "$expected" -gt 0 ]]; then
+
+    if [[ -f "$output" ]] && [[ "$expected" -gt 0 ]]; then
       local current
-      current=$(stat -c%s "$output" 2>/dev/null || echo 0)
-      local pct=$((current * 100 / expected))
-      (( pct > 100 )) && pct=100
+      current=$(stat -c%s "$output" 2>/dev/null)
+      current="${current:-0}"
+      [[ ! "$current" =~ ^[0-9]+$ ]] && current=0
+
+      local pct=0
+      if [[ "$expected" -gt 0 ]] && [[ "$current" -gt 0 ]]; then
+        pct=$((current * 100 / expected))
+      fi
+      if [[ "$pct" -gt 100 ]]; then
+        pct=100
+      fi
 
       local filled=$((pct * BAR_W / 100))
       local empty=$((BAR_W - filled))
@@ -121,7 +146,7 @@ download() {
       # Calcul vitesse
       local elapsed=$(( SECONDS - start_time ))
       local speed_h=""
-      if [[ "$elapsed" -gt 0 ]]; then
+      if [[ "$elapsed" -gt 0 ]] && [[ "$current" -gt 0 ]]; then
         local bps=$((current / elapsed))
         if [[ "$bps" -gt 1048576 ]]; then
           speed_h="$(awk "BEGIN{printf \"%.1f Mo/s\", $bps/1048576}")"
@@ -135,7 +160,10 @@ download() {
     elif [[ -f "$output" ]]; then
       # Taille inconnue : spinner + taille téléchargée
       local current
-      current=$(stat -c%s "$output" 2>/dev/null || echo 0)
+      current=$(stat -c%s "$output" 2>/dev/null)
+      current="${current:-0}"
+      [[ ! "$current" =~ ^[0-9]+$ ]] && current=0
+
       local dl_h
       if [[ "$current" -gt 1048576 ]]; then
         dl_h="$(awk "BEGIN{printf \"%.1f Mo\", $current/1048576}")"
@@ -159,7 +187,8 @@ download() {
     local full_bar
     full_bar=$(printf '%*s' "$BAR_W" '' | tr ' ' '█')
     local final_size
-    final_size=$(stat -c%s "$output" 2>/dev/null || echo 0)
+    final_size=$(stat -c%s "$output" 2>/dev/null)
+    final_size="${final_size:-0}"
     local final_h
     if [[ "$final_size" -gt 1048576 ]]; then
       final_h="$(awk "BEGIN{printf \"%.1f Mo\", $final_size/1048576}")"
@@ -168,10 +197,16 @@ download() {
     fi
     printf "\r      ${BLUE}[${GREEN}${full_bar}${BLUE}]${RESET} ${GREEN}${BOLD}100%%${RESET}  ${DIM}${final_h}${RESET}$(printf '%20s' '')\n"
     ok "${label}"
+
+    # Réactiver errexit et retourner succès
+    set -e
     return 0
   else
     echo
     fail "${label} — échec du téléchargement"
+
+    # Réactiver errexit et retourner échec
+    set -e
     return 1
   fi
 }
@@ -388,7 +423,7 @@ if confirm "Installer Java 21 Temurin ?"; then
   run "Suppression ancienne clé Adoptium" rm -f /etc/apt/keyrings/adoptium.gpg
   run "Suppression ancien dépôt Adoptium" rm -f /etc/apt/sources.list.d/adoptium.list
   run "Création dossier keyrings" mkdir -p /etc/apt/keyrings
-  run "Téléchargement clé Adoptium" wget -q https://packages.adoptium.net/artifactory/api/gpg/key/public -O /tmp/adoptium.asc
+  download "https://packages.adoptium.net/artifactory/api/gpg/key/public" "/tmp/adoptium.asc" "Clé GPG Adoptium"
 
   run "Conversion clé GPG" gpg --dearmor -o /tmp/adoptium.asc.gpg /tmp/adoptium.asc
   run "Installation clé système" mv /tmp/adoptium.asc.gpg /etc/apt/keyrings/adoptium.gpg
@@ -814,6 +849,7 @@ if confirm "Installer et configurer MCXboxBroadcast ?"; then
       run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
     else
       fail "Valeurs invalides"
+    fi
     fi
   fi
 
