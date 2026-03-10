@@ -67,6 +67,61 @@ run() {
   fi
 }
 
+# ---- Opération longue avec spinner animé + chrono ----
+run_long() {
+  local name="$1"; shift
+  local spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local t_start=$SECONDS
+
+  set +e
+
+  # Lancer la commande en arrière-plan
+  "$@" >/dev/null 2>&1 &
+  local pid=$!
+
+  # Spinner + chrono en temps réel
+  while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(( SECONDS - t_start ))
+    local spin_idx=$(( elapsed % ${#spin_chars[@]} ))
+
+    # Afficher minutes si > 60s
+    local time_str
+    if [[ "$elapsed" -ge 60 ]]; then
+      local mins=$((elapsed / 60))
+      local secs=$((elapsed % 60))
+      time_str="${mins}m${secs}s"
+    else
+      time_str="${elapsed}s"
+    fi
+
+    printf "\r  ${CYAN}  %s${RESET} ${WHITE}%s${RESET}  ${DIM}%s${RESET}    " "${spin_chars[$spin_idx]}" "$name" "$time_str"
+    sleep 0.15
+  done
+
+  wait "$pid"
+  local rc=$?
+  local t_elapsed=$(( SECONDS - t_start ))
+
+  local time_str
+  if [[ "$t_elapsed" -ge 60 ]]; then
+    local mins=$((t_elapsed / 60))
+    local secs=$((t_elapsed % 60))
+    time_str="${mins}m${secs}s"
+  else
+    time_str="${t_elapsed}s"
+  fi
+
+  if [[ $rc -eq 0 ]]; then
+    printf "\r  ${GREEN}  ✔${RESET} ${WHITE}%s${RESET}  ${DIM}(%s)${RESET}$(printf '%20s' '')\n" "$name" "$time_str"
+  else
+    printf "\r  ${RED}  ✘${RESET} ${WHITE}%s${RESET}  ${DIM}(%s)${RESET}$(printf '%20s' '')\n" "$name" "$time_str"
+    set -e
+    return 1
+  fi
+
+  set -e
+}
+
 # ---- Téléchargement avec barre de progression ----
 download() {
   local url="$1"
@@ -329,10 +384,8 @@ declare -A DEP_MAP=(
   ["ca-certificates"]="ca-certificates"
 )
 
-# On commence par un apt update silencieux
-echo -ne "  ${YELLOW}  ⏳${RESET} Mise à jour des dépôts APT..."
-apt update -qq >/dev/null 2>&1
-echo -e "\r  ${GREEN}  ✔${RESET} Mise à jour des dépôts APT                    "
+# On commence par un apt update
+run_long "Mise à jour des dépôts APT" apt update -qq
 
 MISSING_PKGS=()
 ALREADY_OK=()
@@ -401,7 +454,7 @@ if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
 
   info "Installation des paquets manquants..."
   for pkg in "${MISSING_PKGS[@]}"; do
-    run "Installation $pkg" apt install -y "$pkg"
+    run_long "Installation $pkg" apt install -y "$pkg"
   done
 else
   echo
@@ -425,15 +478,15 @@ if confirm "Installer Java 21 Temurin ?"; then
   run "Création dossier keyrings" mkdir -p /etc/apt/keyrings
   download "https://packages.adoptium.net/artifactory/api/gpg/key/public" "/tmp/adoptium.asc" "Clé GPG Adoptium"
 
-  run "Conversion clé GPG" gpg --dearmor -o /tmp/adoptium.asc.gpg /tmp/adoptium.asc
+  run_long "Conversion clé GPG" gpg --dearmor -o /tmp/adoptium.asc.gpg /tmp/adoptium.asc
   run "Installation clé système" mv /tmp/adoptium.asc.gpg /etc/apt/keyrings/adoptium.gpg
   run "Permissions clé" chmod 644 /etc/apt/keyrings/adoptium.gpg
 
   DISTRO=$(lsb_release -cs 2>/dev/null || echo "bookworm")
   run "Ajout dépôt Adoptium ($DISTRO)" bash -c "echo 'deb [signed-by=/etc/apt/keyrings/adoptium.gpg arch=amd64] https://packages.adoptium.net/artifactory/deb $DISTRO main' > /etc/apt/sources.list.d/adoptium.list"
 
-  run "Mise à jour dépôts" apt update
-  run "Installation Temurin 21 JRE" apt install -y temurin-21-jre
+  run_long "Mise à jour dépôts" apt update
+  run_long "Installation Temurin 21 JRE" apt install -y temurin-21-jre
 
   JAVA_VER=$(java -version 2>&1 | head -n1)
   if echo "$JAVA_VER" | grep -q "21"; then
@@ -612,9 +665,9 @@ SVCEOF
   chown -R minecraft:minecraft "$MC_DIR"
   chown -R minecraft:minecraft "$SCRIPTS_DIR"
 
-  run "Rechargement systemd" systemctl daemon-reload
-  run "Activation service" systemctl enable minecraft
-  run "Démarrage serveur" systemctl restart minecraft
+  run_long "Rechargement systemd" systemctl daemon-reload
+  run_long "Activation service" systemctl enable minecraft
+  run_long "Démarrage serveur" systemctl restart minecraft
 
   info "Attente du démarrage (premier lancement = plus long)..."
   sleep 8
@@ -652,14 +705,14 @@ step_header 4 $TOTAL_STEPS "Configuration Firewall (UFW)"
 
 if confirm "Configurer le firewall UFW ?"; then
 
-  run "Installation UFW" apt install -y ufw
+  run_long "Installation UFW" apt install -y ufw
   run "Port 22/tcp  (SSH)" ufw allow 22/tcp
   run "Port 25565/tcp (Java)" ufw allow 25565/tcp
   run "Port 25575/tcp (RCON)" ufw allow 25575/tcp
   run "Port 19132/udp (Bedrock)" ufw allow 19132/udp
 
   if ufw status | grep -q "Status: inactive"; then
-    run "Activation UFW" ufw --force enable
+    run_long "Activation UFW" ufw --force enable
   else
     info "UFW déjà actif"
   fi
@@ -735,7 +788,7 @@ if confirm "Installer les plugins depuis une archive tar.gz ?"; then
 
     cd "$PLUGIN_DIR"
     download "$PLUGIN_URL" "$PLUGIN_DIR/Plugins.tar.gz" "Plugins.tar.gz"
-    run "Extraction archive" tar -xzf "$PLUGIN_DIR/Plugins.tar.gz" -C "$PLUGIN_DIR"
+    run_long "Extraction archive" tar -xzf "$PLUGIN_DIR/Plugins.tar.gz" -C "$PLUGIN_DIR"
 
     if [[ -f "$PLUGIN_DIR/MCXboxBroadcastExtension.jar" ]]; then
       mv "$PLUGIN_DIR/MCXboxBroadcastExtension.jar" /tmp/
@@ -748,7 +801,7 @@ if confirm "Installer les plugins depuis une archive tar.gz ?"; then
     ok "Plugins installés"
 
     info "Redémarrage du serveur pour charger les plugins..."
-    run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+    run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
 
     # Attente pour laisser le serveur générer les configs des plugins
     info "Attente de la génération des configs plugins (30s)..."
@@ -816,7 +869,7 @@ if confirm "Installer et configurer MCXboxBroadcast ?"; then
   else
     run "Copie extension" cp "$LOCAL_JAR" "$TARGET_EXT/"
     chown -R minecraft:minecraft "$MC_DIR"
-    run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+    run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
 
     info "Attente config.yml MCXboxBroadcast..."
     TIMEOUT=60; ELAPSED=0
@@ -846,7 +899,7 @@ if confirm "Installer et configurer MCXboxBroadcast ?"; then
       sed -i "s/^ *remote-address: .*/  remote-address: $REMOTE_ADDRESS/" "$CONFIG_XBOX"
       sed -i "s/^ *remote-port: .*/  remote-port: $REMOTE_PORT/" "$CONFIG_XBOX"
       ok "MCXboxBroadcast configuré"
-      run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+      run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
     else
       fail "Valeurs invalides"
     fi
@@ -904,7 +957,7 @@ if confirm "Configurer RCON et Geyser ?"; then
     warn "Config Geyser introuvable — ignoré"
   fi
 
-  run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+  run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
 
 else
   warn "Étape ignorée"
@@ -920,7 +973,7 @@ if confirm "Configurer un nouveau monde ?"; then
 
   SERVER_PROPS="$MC_DIR/server.properties"
 
-  run "Arrêt serveur" systemctl stop "$SERVICE_NAME"
+  run_long "Arrêt serveur" systemctl stop "$SERVICE_NAME"
 
   for world_dir in "$MC_DIR/world" "$MC_DIR/world_nether" "$MC_DIR/world_the_end"; do
     if [[ -d "$world_dir" ]]; then
@@ -949,7 +1002,7 @@ if confirm "Configurer un nouveau monde ?"; then
     fail "server.properties introuvable"
   fi
 
-  run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+  run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
   ok "Nouveau monde sera généré au prochain chargement"
 
 else
@@ -964,9 +1017,9 @@ step_header 9 $TOTAL_STEPS "Installation MariaDB + création bases"
 
 if confirm "Installer MariaDB et créer des bases de données ?"; then
 
-  run "Installation MariaDB" apt install -y mariadb-server
-  run "Activation MariaDB" systemctl enable mariadb
-  run "Démarrage MariaDB" systemctl start mariadb
+  run_long "Installation MariaDB" apt install -y mariadb-server
+  run_long "Activation MariaDB" systemctl enable mariadb
+  run_long "Démarrage MariaDB" systemctl start mariadb
 
   # --- yq v4 ---
   if [[ ! -x "$YQ" ]] || ! "$YQ" --version 2>/dev/null | grep -q "v4"; then
@@ -1261,7 +1314,7 @@ if [[ "${SKIP_STEP10:-false}" != "true" ]]; then
     done
 
     echo
-    run "Redémarrage serveur" systemctl restart "$SERVICE_NAME" || true
+    run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME" || true
 
   else
     warn "Étape ignorée"
