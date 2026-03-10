@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║         MINECRAFT SERVER — SETUP WIZARD v2.0                ║
+# ║         MINECRAFT SERVER — SETUP WIZARD v2.1                ║
 # ║  Java 21 · Paper (Auto) · Plugins · MariaDB · Firewall     ║
 # ╚══════════════════════════════════════════════════════════════╝
 
@@ -56,212 +57,33 @@ separator() {
   echo -e "  ${GRAY}──────────────────────────────────────────────────────────${RESET}"
 }
 
+# ---- Exécution d'une commande (premier plan, sortie masquée) ----
 run() {
   local name="$1"; shift
   echo -ne "  ${YELLOW}  ⏳${RESET} ${name}..."
-  if "$@" >/dev/null 2>&1; then
-    echo -e "\r  ${GREEN}  ✔${RESET} ${name}                    "
+  if "$@" </dev/null >/dev/null 2>&1; then
+    echo -e "\r  ${GREEN}  ✔${RESET} ${name}                              "
   else
-    echo -e "\r  ${RED}  ✘${RESET} ${name}                    "
+    echo -e "\r  ${RED}  ✘${RESET} ${name}                              "
     return 1
   fi
 }
 
-# ---- Opération longue avec spinner animé + chrono ----
-run_long() {
-  local name="$1"; shift
-  local spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-  local t_start=$SECONDS
-
-  set +e
-
-  # Lancer la commande en arrière-plan
-  "$@" >/dev/null 2>&1 &
-  local pid=$!
-
-  # Spinner + chrono en temps réel
-  while kill -0 "$pid" 2>/dev/null; do
-    local elapsed=$(( SECONDS - t_start ))
-    local spin_idx=$(( elapsed % ${#spin_chars[@]} ))
-
-    # Afficher minutes si > 60s
-    local time_str
-    if [[ "$elapsed" -ge 60 ]]; then
-      local mins=$((elapsed / 60))
-      local secs=$((elapsed % 60))
-      time_str="${mins}m${secs}s"
-    else
-      time_str="${elapsed}s"
-    fi
-
-    printf "\r  ${CYAN}  %s${RESET} ${WHITE}%s${RESET}  ${DIM}%s${RESET}    " "${spin_chars[$spin_idx]}" "$name" "$time_str"
-    sleep 0.15
-  done
-
-  wait "$pid"
-  local rc=$?
-  local t_elapsed=$(( SECONDS - t_start ))
-
-  local time_str
-  if [[ "$t_elapsed" -ge 60 ]]; then
-    local mins=$((t_elapsed / 60))
-    local secs=$((t_elapsed % 60))
-    time_str="${mins}m${secs}s"
-  else
-    time_str="${t_elapsed}s"
-  fi
-
-  if [[ $rc -eq 0 ]]; then
-    printf "\r  ${GREEN}  ✔${RESET} ${WHITE}%s${RESET}  ${DIM}(%s)${RESET}$(printf '%20s' '')\n" "$name" "$time_str"
-  else
-    printf "\r  ${RED}  ✘${RESET} ${WHITE}%s${RESET}  ${DIM}(%s)${RESET}$(printf '%20s' '')\n" "$name" "$time_str"
-    set -e
-    return 1
-  fi
-
-  set -e
-}
-
-# ---- Téléchargement avec barre de progression ----
+# ---- Téléchargement simple (wget premier plan, pas de pipe) ----
 download() {
   local url="$1"
   local output="$2"
   local label="${3:-$(basename "$output")}"
-  local BAR_W=40
 
-  # ══════════════════════════════════════════════════════════════
-  #  IMPORTANT : set +e obligatoire dans cette fonction
-  #  Bash avec set -e tue le script quand (( expr )) retourne 0
-  #  (= false = exit code 1). Toute la logique de progression
-  #  doit tourner sans errexit.
-  # ══════════════════════════════════════════════════════════════
-  set +e
-
-  # Récupération taille du fichier (HEAD)
-  local expected
-  expected=$(curl -sIL "$url" 2>/dev/null | grep -i content-length | tail -1 | awk '{print $2}' | tr -dc '0-9')
-  expected="${expected:-0}"
-  # Protection contre les valeurs vides/invalides
-  [[ ! "$expected" =~ ^[0-9]+$ ]] && expected=0
-
-  # Affichage du label + taille
-  if [[ "$expected" -gt 0 ]]; then
-    local total_h
-    if [[ "$expected" -gt 1048576 ]]; then
-      total_h="$(awk "BEGIN{printf \"%.1f Mo\", $expected/1048576}")"
-    else
-      total_h="$(awk "BEGIN{printf \"%.0f Ko\", $expected/1024}")"
-    fi
-    echo -e "  ${CYAN}  ⬇${RESET}  ${WHITE}${BOLD}${label}${RESET}  ${DIM}(${total_h})${RESET}"
-  else
-    echo -e "  ${CYAN}  ⬇${RESET}  ${WHITE}${BOLD}${label}${RESET}"
-  fi
-
-  # Supprimer le fichier s'il existe déjà (évite stat sur ancien fichier)
+  echo -e "  ${CYAN}  ⬇${RESET}  ${WHITE}${BOLD}${label}${RESET}"
   rm -f "$output" 2>/dev/null
 
-  # Lancement du téléchargement en arrière-plan
-  wget -q "$url" -O "$output" &
-  local pid=$!
-  local start_time=$SECONDS
-
-  # Petite attente pour que le fichier soit créé
-  sleep 0.5
-
-  # Barre de progression en temps réel
-  while kill -0 "$pid" 2>/dev/null; do
-
-    if [[ -f "$output" ]] && [[ "$expected" -gt 0 ]]; then
-      local current
-      current=$(stat -c%s "$output" 2>/dev/null)
-      current="${current:-0}"
-      [[ ! "$current" =~ ^[0-9]+$ ]] && current=0
-
-      local pct=0
-      if [[ "$expected" -gt 0 ]] && [[ "$current" -gt 0 ]]; then
-        pct=$((current * 100 / expected))
-      fi
-      if [[ "$pct" -gt 100 ]]; then
-        pct=100
-      fi
-
-      local filled=$((pct * BAR_W / 100))
-      local empty=$((BAR_W - filled))
-      local bar_done bar_left
-      bar_done=$(printf '%*s' "$filled" '' | tr ' ' '█')
-      bar_left=$(printf '%*s' "$empty" '' | tr ' ' '░')
-
-      local dl_h
-      if [[ "$current" -gt 1048576 ]]; then
-        dl_h="$(awk "BEGIN{printf \"%.1f Mo\", $current/1048576}")"
-      else
-        dl_h="$(awk "BEGIN{printf \"%.0f Ko\", $current/1024}")"
-      fi
-
-      # Calcul vitesse
-      local elapsed=$(( SECONDS - start_time ))
-      local speed_h=""
-      if [[ "$elapsed" -gt 0 ]] && [[ "$current" -gt 0 ]]; then
-        local bps=$((current / elapsed))
-        if [[ "$bps" -gt 1048576 ]]; then
-          speed_h="$(awk "BEGIN{printf \"%.1f Mo/s\", $bps/1048576}")"
-        else
-          speed_h="$(awk "BEGIN{printf \"%.0f Ko/s\", $bps/1024}")"
-        fi
-      fi
-
-      printf "\r      ${BLUE}[${GREEN}${bar_done}${GRAY}${bar_left}${BLUE}]${RESET} ${WHITE}%3d%%${RESET}  ${DIM}%s  %s${RESET}    " "$pct" "$dl_h" "$speed_h"
-
-    elif [[ -f "$output" ]]; then
-      # Taille inconnue : spinner + taille téléchargée
-      local current
-      current=$(stat -c%s "$output" 2>/dev/null)
-      current="${current:-0}"
-      [[ ! "$current" =~ ^[0-9]+$ ]] && current=0
-
-      local dl_h
-      if [[ "$current" -gt 1048576 ]]; then
-        dl_h="$(awk "BEGIN{printf \"%.1f Mo\", $current/1048576}")"
-      else
-        dl_h="$(awk "BEGIN{printf \"%.0f Ko\", $current/1024}")"
-      fi
-      local spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-      local elapsed=$(( SECONDS - start_time ))
-      local spin_idx=$(( elapsed % ${#spin_chars[@]} ))
-      printf "\r      ${CYAN}${spin_chars[$spin_idx]}${RESET}  ${DIM}Téléchargé : %s${RESET}    " "$dl_h"
-    fi
-
-    sleep 0.3
-  done
-
-  wait "$pid"
-  local rc=$?
-
-  if [[ $rc -eq 0 ]]; then
-    # Barre complète en vert
-    local full_bar
-    full_bar=$(printf '%*s' "$BAR_W" '' | tr ' ' '█')
-    local final_size
-    final_size=$(stat -c%s "$output" 2>/dev/null)
-    final_size="${final_size:-0}"
-    local final_h
-    if [[ "$final_size" -gt 1048576 ]]; then
-      final_h="$(awk "BEGIN{printf \"%.1f Mo\", $final_size/1048576}")"
-    else
-      final_h="$(awk "BEGIN{printf \"%.0f Ko\", $final_size/1024}")"
-    fi
-    printf "\r      ${BLUE}[${GREEN}${full_bar}${BLUE}]${RESET} ${GREEN}${BOLD}100%%${RESET}  ${DIM}${final_h}${RESET}$(printf '%20s' '')\n"
+  # wget direct au premier plan — sa barre de progression s'affiche sur stderr
+  if wget -q --show-progress --progress=bar:force:noscroll "$url" -O "$output" 2>&1; then
     ok "${label}"
-
-    # Réactiver errexit et retourner succès
-    set -e
     return 0
   else
-    echo
     fail "${label} — échec du téléchargement"
-
-    # Réactiver errexit et retourner échec
-    set -e
     return 1
   fi
 }
@@ -318,7 +140,7 @@ echo
 echo -e "  ${CYAN}${BOLD}"
 echo "  ╔════════════════════════════════════════════════════════════╗"
 echo "  ║                                                            ║"
-echo "  ║      ⛏️   MINECRAFT SERVER — SETUP WIZARD  v2.0   ⛏️     ║"
+echo "  ║      ⛏️   MINECRAFT SERVER — SETUP WIZARD  v2.1   ⛏️     ║"
 echo "  ║                                                            ║"
 echo "  ║      Java 21 · Paper · Plugins · MariaDB · Firewall       ║"
 echo "  ║                                                            ║"
@@ -385,7 +207,7 @@ declare -A DEP_MAP=(
 )
 
 # On commence par un apt update
-run_long "Mise à jour des dépôts APT" apt update -qq
+run "Mise à jour des dépôts APT" apt update -qq
 
 MISSING_PKGS=()
 ALREADY_OK=()
@@ -454,7 +276,7 @@ if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
 
   info "Installation des paquets manquants..."
   for pkg in "${MISSING_PKGS[@]}"; do
-    run_long "Installation $pkg" apt install -y "$pkg"
+    run "Installation $pkg" apt install -y "$pkg"
   done
 else
   echo
@@ -478,15 +300,15 @@ if confirm "Installer Java 21 Temurin ?"; then
   run "Création dossier keyrings" mkdir -p /etc/apt/keyrings
   download "https://packages.adoptium.net/artifactory/api/gpg/key/public" "/tmp/adoptium.asc" "Clé GPG Adoptium"
 
-  run_long "Conversion clé GPG" gpg --dearmor -o /tmp/adoptium.asc.gpg /tmp/adoptium.asc
+  run "Conversion clé GPG" gpg --dearmor -o /tmp/adoptium.asc.gpg /tmp/adoptium.asc
   run "Installation clé système" mv /tmp/adoptium.asc.gpg /etc/apt/keyrings/adoptium.gpg
   run "Permissions clé" chmod 644 /etc/apt/keyrings/adoptium.gpg
 
   DISTRO=$(lsb_release -cs 2>/dev/null || echo "bookworm")
   run "Ajout dépôt Adoptium ($DISTRO)" bash -c "echo 'deb [signed-by=/etc/apt/keyrings/adoptium.gpg arch=amd64] https://packages.adoptium.net/artifactory/deb $DISTRO main' > /etc/apt/sources.list.d/adoptium.list"
 
-  run_long "Mise à jour dépôts" apt update
-  run_long "Installation Temurin 21 JRE" apt install -y temurin-21-jre
+  run "Mise à jour dépôts" apt update
+  run "Installation Temurin 21 JRE" apt install -y temurin-21-jre
 
   JAVA_VER=$(java -version 2>&1 | head -n1)
   if echo "$JAVA_VER" | grep -q "21"; then
@@ -665,9 +487,9 @@ SVCEOF
   chown -R minecraft:minecraft "$MC_DIR"
   chown -R minecraft:minecraft "$SCRIPTS_DIR"
 
-  run_long "Rechargement systemd" systemctl daemon-reload
-  run_long "Activation service" systemctl enable minecraft
-  run_long "Démarrage serveur" systemctl restart minecraft
+  run "Rechargement systemd" systemctl daemon-reload
+  run "Activation service" systemctl enable minecraft
+  run "Démarrage serveur" systemctl restart minecraft
 
   info "Attente du démarrage (premier lancement = plus long)..."
   sleep 8
@@ -705,14 +527,14 @@ step_header 4 $TOTAL_STEPS "Configuration Firewall (UFW)"
 
 if confirm "Configurer le firewall UFW ?"; then
 
-  run_long "Installation UFW" apt install -y ufw
+  run "Installation UFW" apt install -y ufw
   run "Port 22/tcp  (SSH)" ufw allow 22/tcp
   run "Port 25565/tcp (Java)" ufw allow 25565/tcp
   run "Port 25575/tcp (RCON)" ufw allow 25575/tcp
   run "Port 19132/udp (Bedrock)" ufw allow 19132/udp
 
   if ufw status | grep -q "Status: inactive"; then
-    run_long "Activation UFW" ufw --force enable
+    run "Activation UFW" ufw --force enable
   else
     info "UFW déjà actif"
   fi
@@ -788,7 +610,7 @@ if confirm "Installer les plugins depuis une archive tar.gz ?"; then
 
     cd "$PLUGIN_DIR"
     download "$PLUGIN_URL" "$PLUGIN_DIR/Plugins.tar.gz" "Plugins.tar.gz"
-    run_long "Extraction archive" tar -xzf "$PLUGIN_DIR/Plugins.tar.gz" -C "$PLUGIN_DIR"
+    run "Extraction archive" tar -xzf "$PLUGIN_DIR/Plugins.tar.gz" -C "$PLUGIN_DIR"
 
     if [[ -f "$PLUGIN_DIR/MCXboxBroadcastExtension.jar" ]]; then
       mv "$PLUGIN_DIR/MCXboxBroadcastExtension.jar" /tmp/
@@ -801,7 +623,7 @@ if confirm "Installer les plugins depuis une archive tar.gz ?"; then
     ok "Plugins installés"
 
     info "Redémarrage du serveur pour charger les plugins..."
-    run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+    run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
 
     # Attente pour laisser le serveur générer les configs des plugins
     info "Attente de la génération des configs plugins (30s)..."
@@ -869,7 +691,7 @@ if confirm "Installer et configurer MCXboxBroadcast ?"; then
   else
     run "Copie extension" cp "$LOCAL_JAR" "$TARGET_EXT/"
     chown -R minecraft:minecraft "$MC_DIR"
-    run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+    run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
 
     info "Attente config.yml MCXboxBroadcast..."
     TIMEOUT=60; ELAPSED=0
@@ -887,22 +709,22 @@ if confirm "Installer et configurer MCXboxBroadcast ?"; then
     if [[ -f "$CONFIG_XBOX" ]]; then
       ok "config.yml détecté"
 
-    echo
-    ask "Remote address : "
-    read -r REMOTE_ADDRESS
-    ask "Remote port : "
-    read -r REMOTE_PORT
-    echo
+      echo
+      ask "Remote address : "
+      read -r REMOTE_ADDRESS
+      ask "Remote port : "
+      read -r REMOTE_PORT
+      echo
 
-    if [[ -n "$REMOTE_ADDRESS" && -n "$REMOTE_PORT" ]]; then
-      cp "$CONFIG_XBOX" "$CONFIG_XBOX.bak"
-      sed -i "s/^ *remote-address: .*/  remote-address: $REMOTE_ADDRESS/" "$CONFIG_XBOX"
-      sed -i "s/^ *remote-port: .*/  remote-port: $REMOTE_PORT/" "$CONFIG_XBOX"
-      ok "MCXboxBroadcast configuré"
-      run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
-    else
-      fail "Valeurs invalides"
-    fi
+      if [[ -n "$REMOTE_ADDRESS" && -n "$REMOTE_PORT" ]]; then
+        cp "$CONFIG_XBOX" "$CONFIG_XBOX.bak"
+        sed -i "s/^ *remote-address: .*/  remote-address: $REMOTE_ADDRESS/" "$CONFIG_XBOX"
+        sed -i "s/^ *remote-port: .*/  remote-port: $REMOTE_PORT/" "$CONFIG_XBOX"
+        ok "MCXboxBroadcast configuré"
+        run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+      else
+        fail "Valeurs invalides"
+      fi
     fi
   fi
 
@@ -957,7 +779,7 @@ if confirm "Configurer RCON et Geyser ?"; then
     warn "Config Geyser introuvable — ignoré"
   fi
 
-  run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+  run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
 
 else
   warn "Étape ignorée"
@@ -973,7 +795,7 @@ if confirm "Configurer un nouveau monde ?"; then
 
   SERVER_PROPS="$MC_DIR/server.properties"
 
-  run_long "Arrêt serveur" systemctl stop "$SERVICE_NAME"
+  run "Arrêt serveur" systemctl stop "$SERVICE_NAME"
 
   for world_dir in "$MC_DIR/world" "$MC_DIR/world_nether" "$MC_DIR/world_the_end"; do
     if [[ -d "$world_dir" ]]; then
@@ -1002,7 +824,7 @@ if confirm "Configurer un nouveau monde ?"; then
     fail "server.properties introuvable"
   fi
 
-  run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
+  run "Redémarrage serveur" systemctl restart "$SERVICE_NAME"
   ok "Nouveau monde sera généré au prochain chargement"
 
 else
@@ -1017,9 +839,9 @@ step_header 9 $TOTAL_STEPS "Installation MariaDB + création bases"
 
 if confirm "Installer MariaDB et créer des bases de données ?"; then
 
-  run_long "Installation MariaDB" apt install -y mariadb-server
-  run_long "Activation MariaDB" systemctl enable mariadb
-  run_long "Démarrage MariaDB" systemctl start mariadb
+  run "Installation MariaDB" apt install -y mariadb-server
+  run "Activation MariaDB" systemctl enable mariadb
+  run "Démarrage MariaDB" systemctl start mariadb
 
   # --- yq v4 ---
   if [[ ! -x "$YQ" ]] || ! "$YQ" --version 2>/dev/null | grep -q "v4"; then
@@ -1211,11 +1033,7 @@ if [[ "${SKIP_STEP10:-false}" != "true" ]]; then
       # ─────────────────────────────────────────
       if [[ "$plugin" == "LuckPerms" ]]; then
 
-        # Clé avec tiret → yq syntaxe : ."storage-method"
-        # Bug original : .storage.method ne correspondait pas
         "$YQ" -i '."storage-method" = "mysql"' "$CONFIG"
-
-        # Connexion dans la section data
         "$YQ" -i '.data.address = "localhost:3306"' "$CONFIG"
         "$YQ" -i '.data.database = "'"$DB_SEL"'"' "$CONFIG"
         "$YQ" -i '.data.username = "'"$USER_SEL"'"' "$CONFIG"
@@ -1244,10 +1062,6 @@ if [[ "${SKIP_STEP10:-false}" != "true" ]]; then
       # ─────────────────────────────────────────
       if [[ "$plugin" == "Towny" ]]; then
 
-        # Détection de la structure YAML (varie selon la version)
-        # Structure A (récent) : database_load / sql.* au root
-        # Structure B (ancien) : database.database_load / database.sql.*
-
         towny_root=$("$YQ" e '.database_load // ""' "$CONFIG" 2>/dev/null)
         towny_nested=$("$YQ" e '.database.database_load // ""' "$CONFIG" 2>/dev/null)
 
@@ -1262,7 +1076,6 @@ if [[ "${SKIP_STEP10:-false}" != "true" ]]; then
           "$YQ" -i '.database.sql.password = "'"$PASS_SEL"'"' "$CONFIG"
 
         elif [[ -n "$towny_root" && "$towny_root" != "" ]]; then
-          # Bug original : utilisait .database.sql.* au lieu de .sql.*
           info "Structure Towny détectée : racine (sql.*)"
           "$YQ" -i '.database_load = "mysql"' "$CONFIG"
           "$YQ" -i '.database_save = "mysql"' "$CONFIG"
@@ -1314,7 +1127,7 @@ if [[ "${SKIP_STEP10:-false}" != "true" ]]; then
     done
 
     echo
-    run_long "Redémarrage serveur" systemctl restart "$SERVICE_NAME" || true
+    run "Redémarrage serveur" systemctl restart "$SERVICE_NAME" || true
 
   else
     warn "Étape ignorée"
